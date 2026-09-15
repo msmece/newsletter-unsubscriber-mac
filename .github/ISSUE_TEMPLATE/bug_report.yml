@@ -1,0 +1,20 @@
+name: Bug report
+description: Report a reproducible app issue
+body:
+  - type: markdown
+    attributes:
+      value: Do not include account emails, device codes, tokens, message contents, or personalized unsubscribe links. See SECURITY.md for vulnerability reports.
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include expected and actual behavior using synthetic examples.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: macOS version, chip architecture, Node version, and commit/build.
+    validations:
+      required: true

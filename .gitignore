@@ -1,0 +1,22 @@
+node_modules
+dist
+out
+.DS_Store
+.eslintcache
+*.log*
+
+# Local account configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+msal-cache*
+config.local.json
+# Local reports, exports, and app data
+publication/
+.local/
+coverage/
+*.tsbuildinfo
