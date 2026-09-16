@@ -25,7 +25,7 @@
     "check": "npm run format:check && npm run lint && npm run test && npm run scan:public && npm run build"
   },
   "dependencies": {
-    "@azure/msal-node": "^5.6.0",
+    "@azure/msal-node": "^6.0.0",
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
     "ipaddr.js": "2.5.0"
