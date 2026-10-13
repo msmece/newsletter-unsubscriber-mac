@@ -3,9 +3,10 @@
 A desktop app for finding newsletters in your Microsoft mailbox and unsubscribing
 from the ones you no longer want. Built with Electron and TypeScript.
 
-**Status:** source distribution for local development. macOS is the primary target.
-There are no signed or notarized releases provided by this repository. Microsoft
-sign-in requires your own public-client app registration.
+**Status:** macOS builds are produced by GitHub Actions for Apple Silicon and Intel.
+Downloads are ad-hoc signed; Apple Developer ID signing and notarization are not
+configured. Microsoft sign-in requires your own public-client app registration.
+See [download and release instructions](docs/DOWNLOADS.md).
 
 ![App welcome screen with synthetic newsletter examples](docs/preview.png)
 
@@ -18,6 +19,7 @@ sign-in requires your own public-client app registration.
 - See domain summaries and a plain-language Activity log with request timing,
   destinations, HTTP results, and the one-click POST body.
 - Keep scan history locally; no analytics or developer-operated backend.
+- Reset all statistics, scan results, completion history, and activity in one action.
 
 ## Quick start
 
@@ -62,13 +64,27 @@ still produce duplicate-looking rows. Separate lists on one domain remain separa
 
 - **One-click HTTPS link:** sends `POST` with content type
   `application/x-www-form-urlencoded` and body `List-Unsubscribe=One-Click`.
-  A successful server response is recorded as “Unsubscribed”; this means the request
+  A successful server response is recorded as “Request accepted”; this means the request
   was accepted, not that the sender's future delivery behavior was verified.
 - **Other HTTPS links:** opens your browser. Complete the sender's steps, then use
-  **Mark as unsubscribed**.
+  **Mark as completed**. This is shown as “Marked complete”.
 - **Email links:** opens your email app. Review and send the request yourself.
 - Insecure HTTP links and unsafe local-network destinations are not opened automatically.
 - Requests time out after 30 seconds. Automatic unsubscribe requests do not follow redirects.
+
+One-click support belongs to the URL advertised by that particular message. Grouping
+messages never turns a manual link into a one-click link. The app tries newer supported
+links first and tries alternatives before opening a manual page or email. Rate limiting
+stops further automatic attempts for that entry.
+
+Completed entries still offer **Try again**. If a rescan finds mail received after the
+last completed request, the entry returns to **Active** with a notice. Delivery can
+take time to stop; new mail does not by itself prove that the sender ignored the request.
+Scanning different folders retains earlier entries and unresolved failures.
+
+Results saved by older versions lack per-link capability information. **Rescan your
+folders** to refresh those links before using automatic one-click requests. Until then,
+saved links require manual completion. URL paths and tokens preserve their original case.
 
 ### Bulk behavior
 
@@ -89,11 +105,40 @@ modify mail. Authentication is handled by Microsoft's MSAL library. Microsoft an
 the newsletter sender receive the requests needed to perform their respective actions.
 
 Scan results include sender addresses, subjects, folder names, and personalized
-unsubscribe URLs. They are stored **unencrypted in local app storage**, protected by
-your operating-system account permissions. Treat that directory as personal data.
-Use **Clear dashboard** to remove results, or sign out to clear results and remove
+unsubscribe URLs. New history is saved in an **encrypted file**, using AES-256-GCM
+and an encryption key protected by Electron `safeStorage` (Keychain on macOS).
+If you prefer to deny Keychain access, choose **Encrypt history with a password**
+inside the app. Use a long, unique passphrase of at least 12 characters, separate
+from your Microsoft password. The app uses AES-256-GCM with a key derived using
+PBKDF2-HMAC-SHA256, a random salt, and 600,000 iterations. Only ciphertext and public
+encryption parameters are saved; the password and derived key are never persisted.
+You must unlock history after each app restart or renderer reload. **Forgotten
+history passwords cannot be recovered.**
+
+History is decrypted in memory while the app is running. Encryption protects saved
+data; it cannot protect against an attacker who controls the running app or your Mac.
+Use **Reset all stats** to remove results, scan totals, completion history, insights,
+and activity. Confirm the reset to delete these records; the Microsoft connection
+and an unlocked history password remain active. Unlock password-protected history
+before resetting it. Signing out clears results and removes
 cached accounts. Authentication credentials are stored using Electron `safeStorage`;
 the app does not fall back to writing plaintext credentials.
+If secure storage is unavailable or cannot be read or written, sign-in can continue
+using an in-memory token cache for this app session. A notice explains that you will
+need to sign in again after restarting. Existing unreadable credentials are not
+overwritten; signing out removes the saved credential cache as well.
+
+History saved by older versions is migrated from browser storage only after an
+encrypted file is successfully written. The app then clears its old browser-storage
+database. If secure storage is unavailable, **new history stays in memory** and the
+app displays a notice. Existing plaintext history is preserved to avoid losing your
+results and is explicitly identified as unencrypted until migration can finish.
+Allow the app's Keychain access prompt or configure a local history password to
+complete that migration. Updating only the UI of a running older app can create
+an encrypted browser backup; restart and unlock it to finish file migration and
+browser-database cleanup. The app displays a notice until cleanup succeeds.
+Deleting an old storage database is not a guarantee of forensic erasure of disk,
+backup, or filesystem snapshot copies.
 
 Activity retains the latest 200 steps in memory until the app exits. It omits tokens,
 message contents, and personalized URL paths/query strings. The known one-click POST
@@ -122,15 +167,16 @@ Microsoft registration or inspecting a signed package on a clean Mac.
 
 ## Troubleshooting
 
-| Problem                     | What to do                                                                           |
-| --------------------------- | ------------------------------------------------------------------------------------ |
-| “Sign-in is not configured” | Fill in `.env` or packaged `config.json`; restart the app.                           |
-| Microsoft rejects sign-in   | Verify the account audience, public-client flow setting, and tenant consent.         |
-| Sign-in expired             | Sign out and reconnect.                                                              |
-| No newsletters found        | Select more folders; only supported unsubscribe headers are detected.                |
-| Request needs action        | Finish the page/email opened by the app, then mark it completed.                     |
-| Domain skipped              | Retry the failed entry individually; see the bulk behavior above.                    |
-| Credentials cannot be saved | Ensure macOS secure credential storage is available. Plaintext fallback is disabled. |
+| Problem                      | What to do                                                                                      |
+| ---------------------------- | ----------------------------------------------------------------------------------------------- |
+| “Sign-in is not configured”  | Fill in `.env` or packaged `config.json`; restart the app.                                      |
+| Microsoft rejects sign-in    | Verify the account audience, public-client flow setting, and tenant consent.                    |
+| Sign-in expired              | Sign out and reconnect.                                                                         |
+| No newsletters found         | Select more folders; only supported unsubscribe headers are detected.                           |
+| Request needs action         | Finish the page/email opened by the app, then mark it completed.                                |
+| Mail arrives after a request | Rescan for current links and use Try again; a request response does not verify future delivery. |
+| Domain skipped               | Retry the failed entry individually; see the bulk behavior above.                               |
+| Credentials cannot be saved  | Ensure macOS secure credential storage is available. Plaintext fallback is disabled.            |
 
 ## License
 

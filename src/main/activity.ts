@@ -98,7 +98,7 @@ export async function activityFetch(
 }
 
 export async function openExternalWithActivity(url: string): Promise<void> {
-  const email = url.startsWith('mailto:')
+  const email = /^mailto:/i.test(url)
   const finish = beginActivity(
     email ? 'Open an unsubscribe email' : 'Open a page in your browser',
     serviceDestination(url),

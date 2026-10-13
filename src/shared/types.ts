@@ -7,17 +7,28 @@ export interface MailboxFolder {
 
 export type NewsletterStatus = 'found' | 'unsubscribed' | 'failed' | 'action-required'
 
+export interface UnsubscribeLink {
+  url: string
+  oneClick: boolean
+  receivedAt: string
+}
+
 export interface NewsletterCandidate {
   id: string
   sender: string
   subject: string
   listId?: string
   unsubscribeUrls: string[]
+  // Older saved results have no per-message capability information.
+  unsubscribeLinks?: UnsubscribeLink[]
   oneClick: boolean
   messageCount: number
   folderNames: string[]
   firstSeen: string
+  lastSeen?: string
   status: NewsletterStatus
+  completion?: 'request' | 'manual'
+  manualUrl?: string
   error?: string
   requestFailed?: boolean
   updatedAt: string
@@ -35,15 +46,27 @@ export interface PersistedState {
   lastScan?: ScanResult
 }
 
+export interface HistoryStorageInfo {
+  mode: 'encrypted' | 'session'
+  locked: boolean
+  hasSavedHistory: boolean
+}
+
+export interface HistoryLoadResult extends HistoryStorageInfo {
+  state: PersistedState
+}
+
 export interface UnsubscribeOutcome {
   status: NewsletterStatus
   error?: string
   requestFailed?: boolean
+  manualUrl?: string
 }
 
 export interface AccountInfo {
   username: string
   name?: string
+  sessionOnly?: boolean
 }
 
 export interface DeviceCodeInfo {

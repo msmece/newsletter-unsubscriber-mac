@@ -7,11 +7,26 @@ import type {
   MailboxFolder,
   NewsletterCandidate,
   ScanResult,
-  UnsubscribeOutcome
+  UnsubscribeOutcome,
+  HistoryLoadResult,
+  HistoryStorageInfo,
+  PersistedState
 } from '../shared/types'
 
 // Custom APIs for renderer
 const api = {
+  history: {
+    load: (): Promise<HistoryLoadResult> => ipcRenderer.invoke('history:load'),
+    save: (state: PersistedState): Promise<HistoryStorageInfo> =>
+      ipcRenderer.invoke('history:save', state),
+    clear: (): Promise<HistoryStorageInfo> => ipcRenderer.invoke('history:clear'),
+    reset: (encryptedHistory?: string): Promise<HistoryStorageInfo> =>
+      ipcRenderer.invoke('history:reset', encryptedHistory),
+    purgeLegacy: (): Promise<void> => ipcRenderer.invoke('history:purgeLegacy'),
+    loadPassword: (): Promise<string | null> => ipcRenderer.invoke('history:passwordLoad'),
+    savePassword: (encrypted: string): Promise<void> =>
+      ipcRenderer.invoke('history:passwordSave', encrypted)
+  },
   activity: {
     list: (): Promise<ActivityEntry[]> => ipcRenderer.invoke('activity:list'),
     clear: (): Promise<void> => ipcRenderer.invoke('activity:clear'),

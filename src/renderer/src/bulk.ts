@@ -11,7 +11,7 @@ export async function runDomainBatch(
   selected: NewsletterCandidate[],
   history: NewsletterCandidate[],
   attempt: (candidate: NewsletterCandidate) => Promise<UnsubscribeOutcome>,
-  onResult: (candidate: NewsletterCandidate, outcome: UnsubscribeOutcome) => void,
+  onResult: (candidate: NewsletterCandidate, outcome: UnsubscribeOutcome) => void | Promise<void>,
   onSkip: (candidate: NewsletterCandidate, domain: string) => void
 ): Promise<void> {
   const blocked = new Set(
@@ -38,6 +38,6 @@ export async function runDomainBatch(
       }
     }
     if (outcome.status === 'failed' || outcome.requestFailed) blocked.add(domain)
-    onResult(candidate, outcome)
+    await onResult(candidate, outcome)
   }
 }

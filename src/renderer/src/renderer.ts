@@ -1,6 +1,18 @@
 import './styles.css'
+import { newestLinks } from '../../shared/newsletter'
 import { runDomainBatch } from './bulk'
-import { loadState, mergeScanWithHistory, saveState, clearState } from './storage'
+import {
+  loadState,
+  mergeScanWithHistory,
+  saveState,
+  clearState,
+  resetState,
+  historyStorageMessage,
+  historyPasswordLocked,
+  historyPasswordEnabled,
+  protectHistoryWithPassword,
+  unlockHistoryWithPassword
+} from './storage'
 import type {
   ActivityEntry,
   AccountInfo,
@@ -21,16 +33,109 @@ let deviceCode: DeviceCodeInfo | null = null
 let folders: MailboxFolder[] = []
 let selectedFolderIds = new Set<string>()
 let selectedCandidateIds = new Set<string>()
-let state: PersistedState = loadState()
+let state: PersistedState = { candidates: [] }
 let statusMessage = 'Sign in to get started.'
 let isBusy = false
 let activeView: 'newsletters' | 'folders' | 'insights' | 'activity' = 'newsletters'
 let activeFilter = 'all'
 let searchQuery = ''
 let activityEntries: ActivityEntry[] = []
+let reconnectRequired = false
 const skippedCandidates = new Map<string, string>()
 
 const SELECTABLE_STATUSES: NewsletterCandidate['status'][] = ['found', 'failed']
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error
+    ? error.message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, '')
+    : fallback
+}
+
+function renderHistorySecurity(parent: HTMLElement): void {
+  if (historyPasswordEnabled() && !historyPasswordLocked()) return
+  const locked = historyPasswordLocked()
+  const section = element('details', undefined, 'panel history-security')
+  section.open = locked
+  section.append(
+    element('summary', locked ? 'Unlock encrypted history' : 'Encrypt history with a password')
+  )
+  const form = element('form', undefined, 'history-security-form')
+  form.append(
+    element(
+      'p',
+      locked
+        ? 'Enter your history password. It is separate from your Microsoft account password.'
+        : 'Protect saved history without Keychain access. Choose a long, unique passphrase of at least 12 characters, separate from your Microsoft password. It is never stored and cannot be recovered if forgotten.',
+      'panel-description'
+    )
+  )
+  const label = element('label', 'History password')
+  const password = element('input', undefined, 'search-input')
+  password.type = 'password'
+  password.autocomplete = locked ? 'current-password' : 'new-password'
+  password.required = true
+  password.minLength = locked ? 1 : 12
+  password.maxLength = 1024
+  password.disabled = isBusy
+  label.append(password)
+  form.append(label)
+  const confirmation = element('input', undefined, 'search-input')
+  if (!locked) {
+    const confirmLabel = element('label', 'Confirm history password')
+    confirmation.type = 'password'
+    confirmation.autocomplete = 'new-password'
+    confirmation.required = true
+    confirmation.disabled = isBusy
+    confirmLabel.append(confirmation)
+    form.append(confirmLabel)
+  }
+  const submit = element(
+    'button',
+    locked ? 'Unlock history' : 'Encrypt saved history',
+    'button button-primary'
+  )
+  submit.type = 'submit'
+  submit.disabled = isBusy
+  form.append(submit)
+  form.addEventListener('submit', (event) => {
+    event.preventDefault()
+    if (isBusy) return
+    const value = password.value
+    const repeated = confirmation.value
+    password.value = ''
+    confirmation.value = ''
+    if (!locked && value !== repeated) {
+      statusMessage = 'The history passwords do not match. Please enter them again.'
+      render()
+      return
+    }
+    void setHistoryPassword(value, locked)
+  })
+  section.append(form)
+  parent.append(section)
+}
+
+async function setHistoryPassword(password: string, unlock: boolean): Promise<void> {
+  if (isBusy) return
+  isBusy = true
+  statusMessage = unlock ? 'Unlocking saved history…' : 'Encrypting saved history…'
+  render()
+  try {
+    if (unlock) state = await unlockHistoryWithPassword(password)
+    else await protectHistoryWithPassword(state, password)
+    statusMessage = unlock ? 'Encrypted history unlocked.' : 'History encrypted with your password.'
+  } catch (error) {
+    statusMessage = unlock
+      ? 'That password could not unlock the saved history. Check it and try again.'
+      : errorMessage(
+          error,
+          'History encryption could not be saved. Your existing history was preserved.'
+        )
+  } finally {
+    isBusy = false
+    render()
+  }
+}
 
 function getSenderDomain(sender: string): string {
   const at = sender.lastIndexOf('@')
@@ -69,10 +174,17 @@ function formatDate(value?: string): string {
   )
 }
 
-function statusLabel(status: NewsletterCandidate['status']): string {
+function statusLabel(
+  status: NewsletterCandidate['status'],
+  completion?: NewsletterCandidate['completion']
+): string {
   switch (status) {
     case 'unsubscribed':
-      return 'Unsubscribed'
+      return completion === 'manual'
+        ? 'Marked complete'
+        : completion === 'request'
+          ? 'Request accepted'
+          : 'Request recorded'
     case 'failed':
       return 'Failed'
     case 'action-required':
@@ -180,6 +292,8 @@ function renderSignIn(parent: HTMLElement): void {
   renderActivity(activityContent)
   activityDetails.append(activityContent)
   section.append(activityDetails)
+  section.append(resetStatsButton())
+  renderHistorySecurity(section)
   const preview = element('aside', undefined, 'welcome-preview')
   const previewHeading = element('div', undefined, 'preview-heading')
   previewHeading.append(
@@ -222,7 +336,7 @@ function renderStats(parent: HTMLElement): void {
   const values = [
     ['Newsletters found', state.candidates.length, 'stat-found'],
     [
-      'Unsubscribed',
+      'Completed',
       state.candidates.filter((item) => item.status === 'unsubscribed').length,
       'stat-success'
     ],
@@ -243,7 +357,7 @@ function renderStats(parent: HTMLElement): void {
         className === 'stat-found'
           ? 'Across your scanned folders'
           : className === 'stat-success'
-            ? 'A little less inbox noise'
+            ? 'Requests sent or marked complete'
             : className === 'stat-failed'
               ? 'Ready for another try'
               : 'Finish in your browser'
@@ -271,13 +385,23 @@ function renderFolderPicker(parent: HTMLElement): void {
       selectedFolderIds.clear()
       render()
     }),
-    button('Refresh folders', 'button button-quiet', refreshFolders)
+    button('Refresh folders', 'button button-quiet', () => void refreshFolders())
   )
+  if (reconnectRequired)
+    toolbar.append(button('Reconnect Microsoft', 'button button-primary', startSignIn))
   section.append(heading, toolbar)
 
   const list = element('div', undefined, 'folder-list')
   if (folders.length === 0) {
-    list.append(element('p', 'No mail folders were returned.', 'muted'))
+    list.append(
+      element(
+        'p',
+        reconnectRequired
+          ? 'Reconnect your Microsoft account to load its folders.'
+          : 'No mail folders were returned. Use Refresh folders to try again.',
+        'muted'
+      )
+    )
   } else {
     for (const folder of folders) {
       const label = element('label', undefined, 'folder-option')
@@ -304,7 +428,7 @@ function renderFolderPicker(parent: HTMLElement): void {
     'button button-primary',
     scanSelectedFolders
   )
-  scanButton.disabled = isBusy || selectedFolderIds.size === 0
+  scanButton.disabled = isBusy || selectedFolderIds.size === 0 || historyPasswordLocked()
   section.append(scanButton)
   parent.append(section)
 }
@@ -343,7 +467,11 @@ function renderCandidate(parent: HTMLElement, candidate: NewsletterCandidate): v
   )
   top.append(
     titleGroup,
-    element('span', statusLabel(candidate.status), statusClass(candidate.status))
+    element(
+      'span',
+      statusLabel(candidate.status, candidate.completion),
+      statusClass(candidate.status)
+    )
   )
   card.append(top)
 
@@ -365,10 +493,21 @@ function renderCandidate(parent: HTMLElement, candidate: NewsletterCandidate): v
 
   const actions = element('div', undefined, 'newsletter-actions')
   if (candidate.status === 'unsubscribed') {
-    actions.append(element('span', 'Request sent successfully.', 'success-message'))
+    actions.append(
+      element(
+        'span',
+        candidate.completion === 'manual'
+          ? 'You marked this request as completed.'
+          : candidate.completion === 'request'
+            ? 'The sender accepted the request. Future delivery has not been verified.'
+            : 'An earlier request was recorded. You can retry using the current links.',
+        'success-message'
+      ),
+      button('Try again', 'button button-quiet button-small', () => unsubscribeFrom(candidate))
+    )
   } else if (candidate.status === 'action-required') {
     actions.append(
-      button('Mark as unsubscribed', 'button button-primary button-small', () =>
+      button('Mark as completed', 'button button-primary button-small', () =>
         markAsUnsubscribed(candidate.id)
       ),
       button('Open link again', 'button button-quiet button-small', () =>
@@ -408,7 +547,7 @@ function renderDashboard(parent: HTMLElement): void {
   for (const [key, label] of [
     ['all', 'All newsletters'],
     ['found', 'Active'],
-    ['unsubscribed', 'Unsubscribed'],
+    ['unsubscribed', 'Completed'],
     ['action-required', 'Needs action'],
     ['failed', 'Failed']
   ]) {
@@ -510,14 +649,7 @@ function renderDashboard(parent: HTMLElement): void {
         ? `${state.lastScan.messageCount.toLocaleString()} messages checked.`
         : 'Results stay on this device only.',
       'muted'
-    ),
-    button('Clear dashboard', 'button button-quiet', () => {
-      clearState()
-      state = { candidates: [] }
-      selectedCandidateIds.clear()
-      statusMessage = 'Dashboard cleared.'
-      render()
-    })
+    )
   )
   section.append(footer)
   parent.append(section)
@@ -592,7 +724,7 @@ function renderDomainSummary(parent: HTMLElement): void {
   head.append(
     element('th', 'Domain'),
     element('th', 'Mails found'),
-    element('th', 'Unsubscribed'),
+    element('th', 'Completed'),
     element('th', 'Failed'),
     element('th', 'Action required')
   )
@@ -799,20 +931,44 @@ function render(): void {
       'page-description'
     )
   )
-  header.append(
-    title,
-    button('Scan mailbox', 'button button-primary', () => {
-      activeView = 'folders'
-      render()
-    })
-  )
-  header.querySelector('button')?.prepend(icon('scan'))
+  const actions = element('div', undefined, 'header-actions')
+  const scan = button('Scan mailbox', 'button button-primary', () => {
+    activeView = 'folders'
+    render()
+  })
+  scan.prepend(icon('scan'))
+  actions.append(resetStatsButton(), scan)
+  header.append(title, actions)
   main.append(header)
   if (activeView === 'newsletters') renderStats(main)
   const status = element('p', statusMessage, `status-message ${isBusy ? 'is-busy' : ''}`)
   status.setAttribute('role', 'status')
   main.append(status)
-  if (activeView === 'folders') renderFolderPicker(main)
+  if (account.sessionOnly) {
+    const notice = element(
+      'p',
+      'Connected for this session. Secure credential storage is unavailable; sign in again after restarting the app.',
+      'bulk-policy'
+    )
+    notice.setAttribute('role', 'note')
+    main.append(notice)
+  }
+  const historyNotice = historyStorageMessage()
+  if (historyNotice) {
+    const notice = element('p', historyNotice, 'bulk-policy')
+    notice.setAttribute('role', 'note')
+    main.append(notice)
+  }
+  renderHistorySecurity(main)
+  if (historyPasswordLocked()) {
+    main.append(
+      element(
+        'p',
+        'Unlock history to view saved newsletters or scan new ones.',
+        'panel-description'
+      )
+    )
+  } else if (activeView === 'folders') renderFolderPicker(main)
   else if (activeView === 'insights') renderDomainSummary(main)
   else if (activeView === 'activity') {
     const activityContent = element('div')
@@ -846,12 +1002,13 @@ async function startSignIn(): Promise<void> {
   render()
   try {
     account = await window.api.auth.login()
+    reconnectRequired = false
     deviceCode = null
     statusMessage = `Signed in as ${account.username}.`
-    await refreshFolders()
+    await refreshFolders(true)
   } catch (error) {
     deviceCode = null
-    statusMessage = error instanceof Error ? error.message : 'Sign-in failed.'
+    statusMessage = errorMessage(error, 'Sign-in failed.')
   } finally {
     stopListening()
     isBusy = false
@@ -866,7 +1023,7 @@ async function signOut(): Promise<void> {
   isBusy = true
   try {
     await window.api.auth.logout()
-    clearState()
+    await clearState()
     state = { candidates: [] }
     selectedCandidateIds.clear()
     skippedCandidates.clear()
@@ -883,8 +1040,8 @@ async function signOut(): Promise<void> {
   }
 }
 
-async function refreshFolders(): Promise<void> {
-  if (isBusy && folders.length > 0) {
+async function refreshFolders(force = false): Promise<void> {
+  if (isBusy && !force) {
     return
   }
   isBusy = true
@@ -892,12 +1049,14 @@ async function refreshFolders(): Promise<void> {
   render()
   try {
     folders = await window.api.mail.listFolders()
+    reconnectRequired = false
     selectedFolderIds = new Set(
       folders.filter(({ id }) => selectedFolderIds.has(id)).map(({ id }) => id)
     )
     statusMessage = `${folders.length} mail folder${folders.length === 1 ? '' : 's'} available.`
   } catch (error) {
-    statusMessage = error instanceof Error ? error.message : 'Folders could not be loaded.'
+    statusMessage = errorMessage(error, 'Folders could not be loaded.')
+    reconnectRequired = /sign-in expired|Not signed in/i.test(statusMessage)
   } finally {
     isBusy = false
     render()
@@ -906,7 +1065,7 @@ async function refreshFolders(): Promise<void> {
 
 async function scanSelectedFolders(): Promise<void> {
   const selected = folders.filter(({ id }) => selectedFolderIds.has(id))
-  if (selected.length === 0 || isBusy) {
+  if (selected.length === 0 || isBusy || historyPasswordLocked()) {
     return
   }
   isBusy = true
@@ -923,10 +1082,10 @@ async function scanSelectedFolders(): Promise<void> {
       candidates: mergeScanWithHistory(scan, state.candidates),
       lastScan: scan
     }
-    saveState(state)
+    await saveState(state)
     statusMessage = `Scan complete: ${scan.candidates.length} newsletter${scan.candidates.length === 1 ? '' : 's'} found.`
   } catch (error) {
-    statusMessage = error instanceof Error ? error.message : 'The mailbox scan failed.'
+    statusMessage = errorMessage(error, 'The mailbox scan failed.')
   } finally {
     stopListening()
     isBusy = false
@@ -951,6 +1110,8 @@ async function unsubscribeFrom(candidate: NewsletterCandidate): Promise<void> {
           ? {
               ...item,
               status: outcome.status,
+              completion: outcome.status === 'unsubscribed' ? 'request' : undefined,
+              manualUrl: outcome.manualUrl,
               error: outcome.error,
               requestFailed: outcome.requestFailed,
               updatedAt: new Date().toISOString()
@@ -958,13 +1119,13 @@ async function unsubscribeFrom(candidate: NewsletterCandidate): Promise<void> {
           : item
       )
     }
-    saveState(state)
+    await saveState(state)
     statusMessage =
       outcome.status === 'unsubscribed'
-        ? `${candidate.sender} was unsubscribed.`
+        ? `The sender accepted the request for ${candidate.sender}. Future delivery has not been verified.`
         : (outcome.error ?? 'Further action is required.')
   } catch (error) {
-    statusMessage = error instanceof Error ? error.message : 'Unsubscribe failed. Please try again.'
+    statusMessage = errorMessage(error, 'Unsubscribe failed. Please try again.')
   } finally {
     isBusy = false
     render()
@@ -992,7 +1153,7 @@ async function unsubscribeSelected(): Promise<void> {
         render()
         return window.api.mail.unsubscribe(candidate)
       },
-      (candidate, outcome) => {
+      async (candidate, outcome) => {
         if (outcome.status === 'unsubscribed') unsubscribedCount++
         else if (outcome.status === 'action-required') actionRequiredCount++
         else failedCount++
@@ -1003,6 +1164,8 @@ async function unsubscribeSelected(): Promise<void> {
               ? {
                   ...item,
                   status: outcome.status,
+                  completion: outcome.status === 'unsubscribed' ? 'request' : undefined,
+                  manualUrl: outcome.manualUrl,
                   error: outcome.error,
                   requestFailed: outcome.requestFailed,
                   updatedAt: new Date().toISOString()
@@ -1010,7 +1173,7 @@ async function unsubscribeSelected(): Promise<void> {
               : item
           )
         }
-        saveState(state)
+        await saveState(state)
         selectedCandidateIds.delete(candidate.id)
       },
       (candidate, domain) => {
@@ -1023,7 +1186,7 @@ async function unsubscribeSelected(): Promise<void> {
         selectedCandidateIds.delete(candidate.id)
       }
     )
-    statusMessage = `Bulk unsubscribe finished: ${unsubscribedCount} unsubscribed, ${actionRequiredCount} need action, ${failedCount} failed, ${skippedCount} skipped.`
+    statusMessage = `Bulk unsubscribe finished: ${unsubscribedCount} requests accepted, ${actionRequiredCount} need action, ${failedCount} failed, ${skippedCount} skipped.`
     if (skippedDomains.size)
       statusMessage += ` Paused domains: ${[...skippedDomains].join(', ')}. Retry newsletters individually to resolve failures.`
   } finally {
@@ -1032,7 +1195,9 @@ async function unsubscribeSelected(): Promise<void> {
   }
 }
 
-function markAsUnsubscribed(id: string): void {
+async function markAsUnsubscribed(id: string): Promise<void> {
+  if (isBusy) return
+  isBusy = true
   skippedCandidates.delete(id)
   state = {
     ...state,
@@ -1041,6 +1206,8 @@ function markAsUnsubscribed(id: string): void {
         ? {
             ...item,
             status: 'unsubscribed',
+            completion: 'manual',
+            manualUrl: undefined,
             error: undefined,
             requestFailed: false,
             updatedAt: new Date().toISOString()
@@ -1048,13 +1215,23 @@ function markAsUnsubscribed(id: string): void {
         : item
     )
   }
-  saveState(state)
-  statusMessage = 'Newsletter marked as unsubscribed.'
+  render()
+  await saveState(state)
+  isBusy = false
+  statusMessage = 'Newsletter marked as completed.'
   render()
 }
 
 function openUnsubscribeLink(candidate: NewsletterCandidate): void {
-  const link = candidate.unsubscribeUrls[0]
+  const links = newestLinks(
+    candidate.unsubscribeLinks ??
+      candidate.unsubscribeUrls.map((url) => ({ url, oneClick: false, receivedAt: '' }))
+  )
+  const link =
+    candidate.manualUrl ??
+    links.find((item) => !item.oneClick && /^https:\/\//i.test(item.url))?.url ??
+    links.find((item) => /^https:\/\//i.test(item.url))?.url ??
+    links.find((item) => /^mailto:/i.test(item.url))?.url
   if (!link) {
     statusMessage = 'No unsubscribe link is available.'
     render()
@@ -1062,7 +1239,7 @@ function openUnsubscribeLink(candidate: NewsletterCandidate): void {
   }
   // Intercepted by the main process's window-open handler and opened in the system browser.
   window.open(link, '_blank', 'noopener,noreferrer')
-  statusMessage = 'Complete the unsubscribe action in your browser, then mark it as unsubscribed.'
+  statusMessage = 'Complete the unsubscribe action in the opened app, then mark it as completed.'
   render()
 }
 
@@ -1073,7 +1250,13 @@ async function init(): Promise<void> {
     if (content) renderActivity(content)
   })
   window.addEventListener('beforeunload', stopActivity, { once: true })
+  isBusy = true
   render()
+  try {
+    state = await loadState()
+  } catch {
+    statusMessage = 'Saved history could not be loaded. You can continue with a new dashboard.'
+  }
   try {
     activityEntries = await window.api.activity.list()
   } catch {
@@ -1083,13 +1266,72 @@ async function init(): Promise<void> {
     account = await window.api.auth.getAccount()
     if (account) {
       statusMessage = `Signed in as ${account.username}.`
-      await refreshFolders()
+      await refreshFolders(true)
     }
   } catch (error) {
-    statusMessage = error instanceof Error ? error.message : 'Could not restore your sign-in.'
+    statusMessage = errorMessage(error, 'Could not restore your sign-in.')
   } finally {
+    isBusy = false
     render()
   }
 }
 
 void init()
+
+function resetStatsButton(): HTMLButtonElement {
+  const reset = button('Reset all stats', 'button button-quiet', confirmResetStats)
+  reset.disabled = isBusy || historyPasswordLocked()
+  if (historyPasswordLocked()) reset.title = 'Unlock history before resetting statistics.'
+  return reset
+}
+
+function confirmResetStats(): void {
+  if (isBusy || historyPasswordLocked()) return
+  const dialog = element('dialog', undefined, 'reset-dialog')
+  dialog.setAttribute('aria-labelledby', 'reset-stats-title')
+  const title = element('h2', 'Reset all stats?')
+  title.id = 'reset-stats-title'
+  dialog.append(
+    title,
+    element(
+      'p',
+      'This permanently removes newsletter results, completion history, scan totals, insights, and activity from this app. Your Microsoft connection and history encryption setting stay in place.'
+    )
+  )
+  const actions = element('div', undefined, 'reset-dialog-actions')
+  const cancel = button('Cancel', 'button button-quiet', () => dialog.close())
+  cancel.autofocus = true
+  actions.append(
+    cancel,
+    button('Reset all stats', 'button button-danger', () => {
+      dialog.close()
+      void resetAllStats()
+    })
+  )
+  dialog.append(actions)
+  dialog.addEventListener('close', () => dialog.remove(), { once: true })
+  document.body.append(dialog)
+  dialog.showModal()
+}
+
+async function resetAllStats(): Promise<void> {
+  if (isBusy) return
+  isBusy = true
+  render()
+  try {
+    await resetState()
+    state = { candidates: [] }
+    selectedCandidateIds.clear()
+    selectedFolderIds.clear()
+    skippedCandidates.clear()
+    activityEntries = []
+    activeFilter = 'all'
+    searchQuery = ''
+    statusMessage = 'All statistics and history have been reset.'
+  } catch (error) {
+    statusMessage = errorMessage(error, 'Statistics could not be reset. Please try again.')
+  } finally {
+    isBusy = false
+    render()
+  }
+}

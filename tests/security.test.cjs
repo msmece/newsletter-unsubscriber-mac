@@ -101,6 +101,9 @@ test('POST failures record a domain-blocking flag even when the browser opens', 
   )
   const result = await unsubscribe({
     unsubscribeUrls: ['https://example.com/unsubscribe'],
+    unsubscribeLinks: [
+      { url: 'https://example.com/unsubscribe', oneClick: true, receivedAt: '2026-10-01T12:00:00Z' }
+    ],
     oneClick: true
   })
   assert.equal(result.status, 'action-required')

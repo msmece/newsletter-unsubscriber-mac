@@ -38,6 +38,15 @@ Replace the placeholder client ID. Environment variables take precedence over th
 file. The packaged application does not read a working-directory `.env` file.
 Do not place tokens, passwords, or client secrets in this configuration.
 
+## Remembering sign-in
+
+On macOS, credential encryption requires Keychain access. If macOS asks for access
+for this app (Electron during development), allow it to remember your sign-in.
+If you cancel or Keychain is unavailable, the app can still connect for the current
+session. Tokens stay in memory, and a notice explains that restarting the app will
+require sign-in again. Restart and allow Keychain access to restore saved sign-in.
+No plaintext credential file is written in either mode.
+
 Official references:
 
 - [Desktop app configuration](https://learn.microsoft.com/en-us/entra/identity-platform/scenario-desktop-app-configuration)
