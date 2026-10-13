@@ -27,8 +27,22 @@ vulnerability reporting before making the repository public.
 - Browser/email handoffs are completed outside the app. HTTPS links can still lead to
   untrusted sender-controlled websites: an allowed scheme is not a trust endorsement.
 - Credential cache uses the OS-backed Electron `safeStorage`; no plaintext fallback.
-- Scan history is local but unencrypted and may contain personalized unsubscribe links.
-  It is not an encrypted vault. Do not share the app-data directory.
+  If secure persistence is unavailable, tokens remain only in MSAL's in-memory cache
+  for the current app session. Linux's `basic_text` backend is treated as unavailable.
+  Unreadable saved caches are not overwritten; sign-out removes the saved cache file.
+- Scan history uses authenticated AES-256-GCM encryption. Each write uses a fresh
+  nonce. In Keychain mode, each write uses a fresh key wrapped with OS-backed
+  Electron `safeStorage`. In password mode, Web Crypto derives a non-extractable
+  AES-256-GCM key with PBKDF2-HMAC-SHA256 (600,000 iterations, random 32-byte salt).
+  Neither passwords nor password-derived keys are persisted. Only ciphertext is
+  sent to the main process's password-file IPC. History is held in
+  decrypted form in app memory during use. Writes are committed through a temporary
+  encrypted file and rename. If secure storage is unavailable, new history is session-only.
+  A configured history password provides encrypted persistence without Keychain access.
+- Legacy browser history is removed after encrypted migration succeeds. If migration
+  cannot finish, the original data remains with a visible plaintext warning. Browser
+  database deletion does not guarantee forensic erasure or remove backups/snapshots.
+  Unreadable encrypted history is preserved rather than overwritten.
 - Activity records are bounded and memory-only. Only the fixed, non-personal one-click
   POST payload is recorded. Arbitrary bodies and authorization headers are omitted.
 
@@ -36,7 +50,8 @@ vulnerability reporting before making the repository public.
 
 No scan, test suite, or dependency audit guarantees that software is vulnerability-free.
 Mailbox providers and newsletter senders control responses. HTTP success does not prove
-future delivery stopped. No signed/notarized binaries are supplied yet. Build-tool
+future delivery stopped. CI downloads use ad-hoc signatures; Apple Developer ID
+signing and notarization are not configured. Build-tool
 advisories and Electron/Chromium updates must be reviewed before each release.
 
 Guidance: [Electron security recommendations](https://www.electronjs.org/docs/latest/tutorial/security).

@@ -1,6 +1,7 @@
 import { activityFetch } from './activity'
 import { getAccessToken } from './auth'
 import { GRAPH_BASE_URL } from './config'
+import { candidateId, newestLinks, normalizeListId } from '../shared/newsletter'
 import type { MailboxFolder, NewsletterCandidate, ScanResult } from '../shared/types'
 
 interface GraphPage<T> {
@@ -121,12 +122,13 @@ function parseUnsubscribeLinks(values: string[]): string[] {
   for (const value of values) {
     const decoded = decodeHeaderValue(value)
     for (const match of decoded.matchAll(/<([^>]+)>/g)) {
-      const link = match[1].trim()
-      if (
-        (link.startsWith('https://') || link.startsWith('http://') || link.startsWith('mailto:')) &&
-        !links.includes(link)
-      ) {
-        links.push(link)
+      try {
+        const url = new URL(match[1].trim())
+        if (['https:', 'http:', 'mailto:'].includes(url.protocol) && !links.includes(url.href)) {
+          links.push(url.href)
+        }
+      } catch {
+        // Malformed header URLs cannot be used for either automatic or manual actions.
       }
     }
   }
@@ -139,10 +141,13 @@ function parseMessage(message: GraphMessage): ParsedMessage | undefined {
   if (listUnsubscribe.length === 0) {
     return undefined
   }
-  const listUnsubscribePost = (headers.get('list-unsubscribe-post') ?? []).some((value) =>
-    value.toLowerCase().includes('list-unsubscribe=one-click')
-  )
-  const listId = headers.get('list-id')?.[0]?.replace(/[<>]/g, '').trim()
+  const postHeaders = headers.get('list-unsubscribe-post') ?? []
+  const listUnsubscribePost =
+    headers.get('list-unsubscribe')?.length === 1 &&
+    postHeaders.length === 1 &&
+    /^List-Unsubscribe=One-Click$/i.test(postHeaders[0]) &&
+    listUnsubscribe.filter((url) => /^https:\/\//i.test(url)).length === 1
+  const listId = normalizeListId(headers.get('list-id')?.[0])
   return {
     subject: message.subject || '(no subject)',
     sender: message.from?.emailAddress?.address || 'Unknown sender',
@@ -154,9 +159,11 @@ function parseMessage(message: GraphMessage): ParsedMessage | undefined {
 }
 
 function candidateKey(message: ParsedMessage): string {
-  const sender = message.sender.toLowerCase()
-  const identity = message.listId || message.listUnsubscribe[0]
-  return `${sender}|${identity.toLowerCase()}`
+  return candidateId({
+    sender: message.sender,
+    listId: message.listId,
+    unsubscribeUrls: message.listUnsubscribe
+  })
 }
 
 function mergeCandidate(
@@ -165,6 +172,15 @@ function mergeCandidate(
   folderName: string
 ): NewsletterCandidate {
   const now = new Date().toISOString()
+  const unsubscribeLinks = newestLinks([
+    ...message.listUnsubscribe.map((url) => ({
+      url,
+      oneClick: message.listUnsubscribePost && /^https:\/\//i.test(url),
+      receivedAt: message.receivedAt
+    })),
+    ...(existing?.unsubscribeLinks ?? [])
+  ]).slice(0, 100)
+  const receivedAt = message.receivedAt
   if (!existing) {
     return {
       id: candidateKey(message),
@@ -172,18 +188,29 @@ function mergeCandidate(
       subject: message.subject,
       listId: message.listId,
       unsubscribeUrls: message.listUnsubscribe,
+      unsubscribeLinks,
       oneClick: message.listUnsubscribePost,
       messageCount: 1,
       folderNames: [folderName],
-      firstSeen: message.receivedAt || now,
+      firstSeen: receivedAt,
+      lastSeen: receivedAt,
       status: 'found',
       updatedAt: now
     }
   }
   return {
     ...existing,
-    unsubscribeUrls: [...new Set([...existing.unsubscribeUrls, ...message.listUnsubscribe])],
-    oneClick: existing.oneClick || message.listUnsubscribePost,
+    // Keep the original identity URL stable; request order comes from the links.
+    unsubscribeUrls: [
+      ...new Set([existing.unsubscribeUrls[0], ...unsubscribeLinks.map((link) => link.url)])
+    ],
+    unsubscribeLinks,
+    oneClick: unsubscribeLinks.some((link) => link.oneClick),
+    subject:
+      receivedAt > (existing.lastSeen ?? existing.firstSeen) ? message.subject : existing.subject,
+    firstSeen: receivedAt < existing.firstSeen ? receivedAt : existing.firstSeen,
+    lastSeen:
+      receivedAt > (existing.lastSeen ?? existing.firstSeen) ? receivedAt : existing.lastSeen,
     messageCount: existing.messageCount + 1,
     folderNames: [...new Set([...existing.folderNames, folderName])],
     updatedAt: now

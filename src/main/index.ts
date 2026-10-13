@@ -15,6 +15,9 @@ import {
   beginActivity
 } from './activity'
 import { unsubscribe } from './unsubscribe'
+import { loadHistory, saveHistory, clearHistory } from './history'
+import { loadPasswordHistory, savePasswordHistory, clearPasswordHistory } from './password-history'
+import { resetStats } from './reset'
 
 function createWindow(): void {
   // Create the browser window.
@@ -101,6 +104,26 @@ app.whenReady().then(() => {
   })
 
   handle('activity:list', () => getActivity())
+  handle('history:load', () => loadHistory())
+  handle('history:passwordLoad', () => loadPasswordHistory())
+  handle('history:passwordSave', (_event, encrypted) => savePasswordHistory(encrypted))
+  handle('history:save', (_event, state) => saveHistory(state))
+  handle('history:reset', (event, encrypted) => resetStats(event.sender.session, encrypted))
+  handle('history:clear', async (event) => {
+    const info = await clearHistory()
+    await clearPasswordHistory()
+    await event.sender.session.clearStorageData({ storages: ['localstorage'] })
+    return info
+  })
+  handle('history:purgeLegacy', async (event) => {
+    const passwordSaved = await loadPasswordHistory()
+    if (!passwordSaved) {
+      const saved = await loadHistory()
+      if (saved.mode !== 'encrypted' || !saved.hasSavedHistory || saved.locked)
+        throw new Error('Encrypt the saved history before removing its legacy copy.')
+    }
+    await event.sender.session.clearStorageData({ storages: ['localstorage'] })
+  })
   handle('activity:clear', () => clearActivity())
   handle('auth:getAccount', () => getActiveAccount())
   handle('auth:login', async (event) => {
@@ -112,7 +135,12 @@ app.whenReady().then(() => {
     )
     try {
       const account = await acquireToken((info) => win?.webContents.send('auth:device-code', info))
-      finish('success', 'Your account is connected. The app can read your mail folders.')
+      finish(
+        'success',
+        account.sessionOnly
+          ? 'Connected for this session. You will need to sign in again after restarting the app.'
+          : 'Your account is connected. The app can read your mail folders.'
+      )
       return account
     } catch (error) {
       finish('failed', 'Sign-in was not completed. Please try connecting again.')

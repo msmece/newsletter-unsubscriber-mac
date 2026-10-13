@@ -1,0 +1,6 @@
+extends: ./electron-builder.yml
+mac:
+  identity: '-'
+  entitlements: build/entitlements.mac.adhoc.plist
+  entitlementsInherit: build/entitlements.mac.adhoc.plist
+  notarize: false

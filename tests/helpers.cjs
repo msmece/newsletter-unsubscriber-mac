@@ -19,6 +19,11 @@ function load(path, globals = {}, mocks = {}) {
     Response,
     AbortSignal,
     Buffer,
+    TextEncoder,
+    TextDecoder,
+    crypto: require('node:crypto').webcrypto,
+    btoa,
+    atob,
     setTimeout,
     clearTimeout,
     require: (name) => {

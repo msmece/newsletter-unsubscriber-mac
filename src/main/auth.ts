@@ -1,46 +1,95 @@
-import { PublicClientApplication, LogLevel } from '@azure/msal-node'
+import { PublicClientApplication, LogLevel, InteractionRequiredAuthError } from '@azure/msal-node'
 import type { AccountInfo as MsalAccountInfo, Configuration } from '@azure/msal-node'
 import { app, safeStorage } from 'electron'
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { getAuthSettings, GRAPH_SCOPES } from './config'
+import { beginActivity } from './activity'
+import { secureStorageAvailable } from './secure-storage'
 import type { AccountInfo, DeviceCodeInfo } from '../shared/types'
 
 function cacheFile(): string {
   return join(app.getPath('userData'), 'msal-cache.bin')
 }
 
-async function readCache(): Promise<string> {
+let sessionOnly = false
+
+function useSessionCache(): void {
+  if (sessionOnly) return
+  sessionOnly = true
+  const finish = beginActivity('Keep sign-in for this session', 'This app', 'Credential storage')
+  finish(
+    'action-required',
+    'Secure credential storage is unavailable. You can continue, but you will need to sign in again after restarting the app.'
+  )
+}
+
+async function readCache(): Promise<string | undefined> {
   try {
+    if (!secureStorageAvailable()) {
+      useSessionCache()
+      return undefined
+    }
     const buffer = await readFile(cacheFile())
-    if (!safeStorage.isEncryptionAvailable()) return ''
     return safeStorage.decryptString(buffer)
-  } catch {
-    return ''
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') useSessionCache()
+    return undefined
   }
 }
 
 async function writeCache(data: string): Promise<void> {
-  await mkdir(app.getPath('userData'), { recursive: true })
-  if (!safeStorage.isEncryptionAvailable())
-    throw new Error(
-      'Secure credential storage is unavailable. Sign-in cannot be saved on this device.'
-    )
-  await writeFile(cacheFile(), safeStorage.encryptString(data), { mode: 0o600 })
-  await chmod(cacheFile(), 0o600)
+  if (sessionOnly) return
+  try {
+    if (!secureStorageAvailable()) {
+      useSessionCache()
+      return
+    }
+    // Encrypt before creating or overwriting any file. Persistence failure must
+    // not turn a successful Microsoft token exchange into a failed sign-in.
+    const encrypted = safeStorage.encryptString(data)
+    await mkdir(app.getPath('userData'), { recursive: true })
+    await writeFile(cacheFile(), encrypted, { mode: 0o600 })
+    await chmod(cacheFile(), 0o600)
+  } catch {
+    useSessionCache()
+  }
 }
 
 function createClient(): PublicClientApplication {
+  let loaded = false
+  let loading: Promise<string | undefined> | undefined
+  let snapshot: string | undefined
+  let writing = Promise.resolve()
   const config: Configuration = {
     auth: getAuthSettings(),
     cache: {
       cachePlugin: {
         beforeCacheAccess: async (context) => {
-          context.cache.deserialize(await readCache())
+          // Read disk once, but restore the current in-memory snapshot on every
+          // access: MSAL's silent flow clears its storage in overwriteCache().
+          if (!loaded) {
+            loading ??= readCache()
+            const saved = await loading
+            if (!loaded) {
+              snapshot = saved
+              loaded = true
+            }
+          }
+          try {
+            context.cache.deserialize(snapshot ?? '')
+          } catch {
+            snapshot = undefined
+            context.cache.deserialize('')
+            useSessionCache()
+          }
         },
         afterCacheAccess: async (context) => {
           if (context.cacheHasChanged) {
-            await writeCache(context.cache.serialize())
+            const data = context.cache.serialize()
+            snapshot = data
+            writing = writing.then(() => writeCache(data))
+            await writing
           }
         }
       }
@@ -65,7 +114,7 @@ function getClient(): PublicClientApplication {
 let activeAccount: MsalAccountInfo | null = null
 
 function toAccountInfo(account: MsalAccountInfo): AccountInfo {
-  return { username: account.username, name: account.name }
+  return { username: account.username, name: account.name, sessionOnly }
 }
 
 export async function getActiveAccount(): Promise<AccountInfo | null> {
@@ -123,8 +172,12 @@ export async function getAccessToken(): Promise<string> {
       throw new Error('No token was returned.')
     }
     return result.accessToken
-  } catch {
-    throw new Error('Your sign-in expired. Please sign in again.')
+  } catch (error) {
+    if (error instanceof InteractionRequiredAuthError)
+      throw new Error('Your sign-in expired. Please sign in again.')
+    throw new Error(
+      'Microsoft could not refresh your sign-in. Check your connection and try again.'
+    )
   }
 }
 
@@ -134,4 +187,7 @@ export async function signOut(): Promise<void> {
     await getClient().getTokenCache().removeAccount(account)
   }
   activeAccount = null
+  // A locked cache may still contain the previously saved account. Remove it
+  // even when the current session cannot encrypt or decrypt credentials.
+  await rm(cacheFile(), { force: true })
 }
