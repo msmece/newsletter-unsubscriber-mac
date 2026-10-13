@@ -67,7 +67,7 @@ jobs:
           codesign --verify --deep --strict "$app"
           expected="$BUILD_ARCH"
           if [ "$BUILD_ARCH" = x64 ]; then expected=x86_64; fi
-          lipo -verify_arch "$expected" "$app/Contents/MacOS/Newsletter Unsubscriber"
+          lipo "$app/Contents/MacOS/Newsletter Unsubscriber" -verify_arch "$expected"
       - name: Checksums
         env:
           BUILD_ARCH: ${{ matrix.arch }}
